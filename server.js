@@ -9,62 +9,81 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// The ACTUAL encryption key (from your frontend code)
-const ENCRYPTION_KEY = "TERABBAP-hu$BSDMK@555";
+// Exact key generation from frontend code
+function getEncryptionKey() {
+  // From your frontend: atob("VEVSQQ==") + atob("QEJBQVAt") + "hu$BSDMK" + atob("QDU1NQ==")
+  const part1 = Buffer.from("VEVSQQ==", 'base64').toString(); // "TELA"
+  const part2 = Buffer.from("QEJBQVAt", 'base64').toString(); // "@BAAP-"
+  const part3 = "hu$BSDMK";
+  const part4 = Buffer.from("QDU1NQ==", 'base64').toString(); // "@555"
+  
+  const combined = part1 + part2 + part3 + part4;
+  
+  // XOR with 0 (from frontend)
+  let key = "";
+  for (let i = 0; i < combined.length; i++) {
+    key += String.fromCharCode(0 ^ combined.charCodeAt(i));
+  }
+  
+  return key;
+}
 
-// Decrypt function matching frontend logic
-async function decryptData(encryptedData, iv) {
+const ENCRYPTION_KEY = getEncryptionKey();
+
+// Decrypt function - EXACTLY matching frontend
+async function decryptData(encryptedDataBase64, ivBase64) {
   try {
-    // Convert key to 32-byte buffer for AES-256
+    // Get the key exactly as frontend does
+    const keyString = getEncryptionKey();
     const keyBuffer = Buffer.alloc(32);
-    keyBuffer.write(ENCRYPTION_KEY, 0, 'utf8');
+    const keyBytes = Buffer.from(keyString, 'utf8');
+    keyBytes.copy(keyBuffer, 0, 0, Math.min(32, keyBytes.length));
     
-    // Decode base64 inputs
-    const encryptedBuffer = Buffer.from(encryptedData, 'base64');
-    const ivBuffer = Buffer.from(iv, 'base64');
+    // Decode base64
+    const encryptedBuffer = Buffer.from(encryptedDataBase64, 'base64');
+    const ivBuffer = Buffer.from(ivBase64, 'base64');
     
-    // Extract auth tag (last 16 bytes) and ciphertext
-    const authTag = encryptedBuffer.slice(-16);
-    const ciphertext = encryptedBuffer.slice(0, -16);
+    // Auth tag is last 16 bytes
+    const authTagLength = 16;
+    const authTag = encryptedBuffer.slice(-authTagLength);
+    const ciphertext = encryptedBuffer.slice(0, -authTagLength);
     
-    // Create decipher
+    // Decrypt
     const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuffer, ivBuffer);
     decipher.setAuthTag(authTag);
     
-    // Decrypt
-    let decrypted = decipher.update(ciphertext);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    const decrypted = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final()
+    ]);
     
     // Parse JSON
     return JSON.parse(decrypted.toString('utf8'));
   } catch (error) {
-    console.error('Decryption error details:', error.message);
-    throw new Error('Decryption failed: ' + error.message);
+    console.error('❌ Decryption failed:', error.message);
+    throw error;
   }
 }
 
-// Encrypt function matching frontend logic
+// Encrypt function - matching frontend
 async function encryptData(data) {
   try {
-    // Convert key to 32-byte buffer for AES-256
+    const keyString = getEncryptionKey();
     const keyBuffer = Buffer.alloc(32);
-    keyBuffer.write(ENCRYPTION_KEY, 0, 'utf8');
+    const keyBytes = Buffer.from(keyString, 'utf8');
+    keyBytes.copy(keyBuffer, 0, 0, Math.min(32, keyBytes.length));
     
-    // Generate random 12-byte IV
     const iv = crypto.randomBytes(12);
     
-    // Create cipher
     const cipher = crypto.createCipheriv('aes-256-gcm', keyBuffer, iv);
     
-    // Encrypt
     const plaintext = JSON.stringify(data);
-    let encrypted = cipher.update(plaintext, 'utf8');
-    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    const encrypted = Buffer.concat([
+      cipher.update(plaintext, 'utf8'),
+      cipher.final()
+    ]);
     
-    // Get auth tag
     const authTag = cipher.getAuthTag();
-    
-    // Combine encrypted data + auth tag
     const combined = Buffer.concat([encrypted, authTag]);
     
     return {
@@ -72,25 +91,26 @@ async function encryptData(data) {
       iv: iv.toString('base64')
     };
   } catch (error) {
-    console.error('Encryption error details:', error.message);
-    throw new Error('Encryption failed: ' + error.message);
+    console.error('❌ Encryption failed:', error.message);
+    throw error;
   }
 }
 
-// API Routes
+// Routes
 
-// Health check
 app.get('/', (req, res) => {
   res.json({ 
     status: 'active',
     message: 'Decryption API is running',
-    version: '1.0.0',
-    key: 'TERABBAP-hu$BSDMK@555',
+    version: '1.0.1',
+    algorithm: 'AES-256-GCM',
     endpoints: {
       decrypt: 'POST /api/decrypt',
       encrypt: 'POST /api/encrypt',
       health: 'GET /api/health',
-      test: 'GET /api/test'
+      test: 'GET /api/test',
+      debug: 'GET /api/debug',
+      testSample: 'POST /api/decrypt/test'
     }
   });
 });
@@ -99,21 +119,33 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    encryption: 'AES-256-GCM'
+    encryption: 'AES-256-GCM',
+    keyLength: ENCRYPTION_KEY.length
   });
 });
 
-// Test endpoint - encrypt sample data
+app.get('/api/debug', (req, res) => {
+  const keyBuffer = Buffer.alloc(32);
+  const keyBytes = Buffer.from(ENCRYPTION_KEY, 'utf8');
+  keyBytes.copy(keyBuffer, 0, 0, Math.min(32, keyBytes.length));
+  
+  res.json({
+    key_string: ENCRYPTION_KEY,
+    key_length: ENCRYPTION_KEY.length,
+    key_buffer_hex: keyBuffer.toString('hex').substring(0, 32) + '...',
+    algorithm: 'AES-256-GCM',
+    iv_length: 12,
+    auth_tag_length: 16,
+    note: 'Key is derived from base64 decoded parts + XOR operation'
+  });
+});
+
 app.get('/api/test', async (req, res) => {
   try {
     const testData = {
       success: true,
-      message: 'This is a test message',
-      timestamp: Date.now(),
-      data: {
-        user: 'test_user',
-        value: 12345
-      }
+      message: 'Test message',
+      timestamp: Date.now()
     };
     
     const encrypted = await encryptData(testData);
@@ -121,20 +153,24 @@ app.get('/api/test', async (req, res) => {
     
     res.json({
       success: true,
+      test: 'PASSED',
       original: testData,
-      encrypted: encrypted,
+      encrypted: {
+        data: encrypted.data.substring(0, 50) + '...',
+        iv: encrypted.iv
+      },
       decrypted: decrypted,
       match: JSON.stringify(testData) === JSON.stringify(decrypted)
     });
   } catch (error) {
     res.status(500).json({
       success: false,
+      test: 'FAILED',
       error: error.message
     });
   }
 });
 
-// Decrypt endpoint
 app.post('/api/decrypt', async (req, res) => {
   try {
     const { data, iv } = req.body;
@@ -153,16 +189,15 @@ app.post('/api/decrypt', async (req, res) => {
       data: decrypted
     });
   } catch (error) {
-    console.error('Decryption API error:', error);
+    console.error('Decrypt error:', error);
     res.status(500).json({
       success: false,
       error: error.message,
-      details: 'Make sure data and iv are valid base64 strings from encrypted response'
+      hint: 'Verify data and iv are valid base64 strings'
     });
   }
 });
 
-// Encrypt endpoint
 app.post('/api/encrypt', async (req, res) => {
   try {
     const { data } = req.body;
@@ -170,7 +205,7 @@ app.post('/api/encrypt', async (req, res) => {
     if (!data) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required field: data (object or value to encrypt)'
+        error: 'Missing required field: data'
       });
     }
     
@@ -178,11 +213,9 @@ app.post('/api/encrypt', async (req, res) => {
     
     res.json({
       success: true,
-      ...encrypted,
-      note: 'Use this encrypted data with the decrypt endpoint'
+      ...encrypted
     });
   } catch (error) {
-    console.error('Encryption API error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -190,7 +223,28 @@ app.post('/api/encrypt', async (req, res) => {
   }
 });
 
-// Batch decrypt endpoint (multiple encrypted items)
+app.post('/api/decrypt/test', async (req, res) => {
+  try {
+    // Your exact sample data
+    const sampleData = "coTQ9e8v4A9WBmxK9vn02Khkgsbov2KRfLrcW0R0I6H2Z//yKEyB+v5UbnIG2SPftrYdahROp/XeVDI5hwaQoJDbXaoTbJ1D3T/rxjpRkXyi3DHk7XRNy5nysGZRHAgKIHEpPep1qXi+NNAu+oEDbrlfbHM2eQgRNV5gUGj5U9MEIB9SSMsB5vgme5i6e9t/xCCxloRWPUvjVsTwiHMtNujof9tIw4gP/Gx4008km5/HnbfLKH8i1gcdyh9L+QB3uHCYLj+SMOqwFFt+fg44nnWDD0V+93j/kHWuSc9Fe1eTR1fEIzCjusJqGdSIi24jDlwex17jKlCD88lfYnXEtQCN870efIOVLVUgBCquMdmXvdDYCKkcqK7FhUDr4cuS+Y3qpm9WmM/pVQR86sob+yfJJmamz7l0Ox1UP9wSM4XJPvxI2R1z0aza7+viutCB5EXmf8B2cV1h25lIwpirOGkx6zF/nTWKHNmIIN42XX2O90T91Ra/QdPdOobLslmRJ2ahkqc2HE8B/nmwXaAJ5khRb63v01hiilvbFhUiU/8n/ob1jQhqNUOLsZxXjgBdFEASuonGMP1UZ6VtcgJn9FwVRZzKTjtRKJuYcYUesVkZYVILlTnZA/LzjxXt28nW8JxtRiOTc5oeGuF/U+ZUD0Xe/Zvns7EO";
+    const sampleIv = "IjUTDj1TOYKxV9UI";
+    
+    const decrypted = await decryptData(sampleData, sampleIv);
+    
+    res.json({
+      success: true,
+      data: decrypted,
+      message: '✅ Successfully decrypted your sample data!'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      hint: 'Key mismatch - server encryption key may differ from your data source'
+    });
+  }
+});
+
 app.post('/api/decrypt/batch', async (req, res) => {
   try {
     const { items } = req.body;
@@ -198,7 +252,7 @@ app.post('/api/decrypt/batch', async (req, res) => {
     if (!items || !Array.isArray(items)) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required field: items (array of {data, iv} objects)'
+        error: 'Missing field: items (array of {data, iv})'
       });
     }
     
@@ -227,39 +281,27 @@ app.post('/api/decrypt/batch', async (req, res) => {
   }
 });
 
-// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
   res.status(500).json({
     success: false,
-    error: 'Internal server error',
-    message: err.message
+    error: 'Internal server error'
   });
 });
 
-// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
-    error: 'Endpoint not found',
-    availableEndpoints: [
-      'GET /',
-      'GET /api/health',
-      'GET /api/test',
-      'POST /api/decrypt',
-      'POST /api/encrypt',
-      'POST /api/decrypt/batch'
-    ]
+    error: 'Endpoint not found'
   });
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 Decryption API running on port ${PORT}`);
-  console.log(`📍 Base URL: http://localhost:${PORT}`);
-  console.log(`🔑 Encryption Key: ${ENCRYPTION_KEY}`);
-  console.log(`🔐 Algorithm: AES-256-GCM`);
-  console.log(`\n✅ Test the API:`);
-  console.log(`   curl http://localhost:${PORT}/api/test`);
+  console.log(`📍 URL: http://localhost:${PORT}`);
+  console.log(`🔑 Key: ${ENCRYPTION_KEY}`);
+  console.log(`\n✅ Test: curl http://localhost:${PORT}/api/test`);
+  console.log(`✅ Sample: curl -X POST http://localhost:${PORT}/api/decrypt/test`);
 });
 
 module.exports = app;
